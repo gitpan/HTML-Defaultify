@@ -56,7 +56,7 @@ use vars qw($VERSION @ISA @EXPORT @EXPORT_OK %EXPORT_TAGS) ;
 require Exporter ;
 @ISA= qw(Exporter) ;
 
-$VERSION=  '1.0' ;
+$VERSION=  '1.01' ;
 @EXPORT=    qw( defaultify  subhash ) ;
 @EXPORT_OK= qw( hidden_vars  hidden_var  parse_tag  build_tag ) ;
 
@@ -97,7 +97,7 @@ $HAS_HTML_ENTITIES= ($@ eq '') ;
 # If you have an existing hash instead of a reference, use e.g. \%my_hash .
 # If $form_name is given, then only the form(s) with that name in $HTML will
 #   be defaultified.  Otherwise, all of $HTML will be defaultified.
-# Tags inside comments are not affected.
+# Tags inside comments or <script> or <style> blocks are not affected.
 # For a given set of defaults, there may be more than one way to defaultify
 #   a form to return those results, e.g. if several fields have the same
 #   name.  This routine tries to generate a reasonable choice in those cases
@@ -119,16 +119,39 @@ $HAS_HTML_ENTITIES= ($@ eq '') ;
 
 sub defaultify {
     my($HTML, $defaults, $form_name)= @_ ;
-    my(@comments, $i, $marker) ;
+    my(@extracts, $i, $marker) ;
     local($_) ;
 
-    # First, temporarily remove all comments from $HTML to avoid matching tags
-    #   inside comments.  Replace the comments with markers, so they can be
-    #   restored after defaultification is complete. Somewhat hacky approach,
+    # First, temporarily remove all comments, <script>...</script> blocks,
+    #   and <style>...</style> blocks from $HTML, to avoid matching tags
+    #   inside them.  Replace these extractions with markers, so they can be
+    #   restored after defaultification is complete.  Somewhat hacky approach,
     #   but works.
-    # Comments are stored in @comments, and the markers consist of: a random
-    #   string not otherwise in $HTML, plus each comment's location in
-    #   @comments, plus "\0".
+    # Extractions are stored in @extracts, and the markers consist of: a random
+    #   string not otherwise in $HTML, plus each extraction's location in
+    #   @extracts, plus "\0".
+    # All four kinds of extractions (two comment formats, scripts, and styles)
+    #   are handled simultaneously.  This correctly handles cases of when
+    #   "<script>" is inside a comment, or "<!--" is inside a script, etc.
+    #   Note that comments ending with "--\s*>" take precedence over comments
+    #   ending with just ">", so they must be the first alternative in the
+    #   extraction regex below.  The next comment explains the reasoning:
+    # Handling end-of-comments is tricky and varies slightly by browser,
+    #   though all try to handle the illegal but common usage of comments
+    #   ending with only ">" (they are supposed to end with "-->", with
+    #   possible whitespace after the "--").  Netscape and Konqueror seem to
+    #   end comments on "-->" if available (Konqueror allows the whitespace),
+    #   else the comment ends on the next ">".  So to extract comments here,
+    #   first extract "<!-- ... --\s*>" blocks, then extract any remaining
+    #   comments with "<!-- ... >" .  The real solution is to use correct
+    #   HTML in the first place, i.e. end comments with "-->".
+    # <script> and <style> blocks are supposed to end on the first "</" string,
+    #   but in fact browsers seem to end those blocks at the actual </script>
+    #   or </style> tags.  This is most likely what the HTML author expects
+    #   anyway, though it violates the HTML spec.  Worse, browsers vary on
+    #   whether they'll end a <script> block on a literal string "</script>"
+    #   inside the script code.  Balancing all this, for here it's a reasonable
+    #   policy to end those blocks on "</script>" and "</style>".
     # There's a potential problem with the marker:  Even if it's not in
     #   $HTML, certain sequences could cause problems.  Consider a marker of
     #   "xy1xy", and a comment preceded by "xy1".  After the comment->marker
@@ -137,18 +160,6 @@ sub defaultify {
     #   digits and \0 from the marker will prevent a wrong match like this.  
     #   I'm pretty sure this solves it, but please tell me if you think of
     #   any combinations that could break this.
-    # It would be simpler to remove comments, but some people put things like
-    #   JavaScript inside comments :P, so we must preserve them.
-    # Handling end-of-comments is tricky and varies slightly by browser,
-    #   though all try to handle the illegal but common usage of comments
-    #   ending with only ">" (they are supposed to end with "-->", with
-    #   possible whitespace after the "--").  Netscape and Konqueror seem to
-    #   end comments on "-->" if available (Konqueror allows the whitespace),
-    #   else the comment ends on the next ">".  So to delete comments here,
-    #   first delete "<!-- ... --\s*>" blocks, then delete any remaining
-    #   comments with "<!-- ... >" .
-    # The real solution is to use correct HTML in the first place, i.e. end
-    #   comments with "-->".
 
     # Generate a random 5-character string.  Exclude digits, \0, and
     #   what the hell, "<" and ">".
@@ -157,10 +168,15 @@ sub defaultify {
 	$marker= pack("C5", map {rand(193)+63} 1..5) ;  # start after ">"
     } while $HTML=~ /\Q$marker/ ;
 
-    # Extract comments into @comments, replacing them with marker in $HTML.
+    # Extract comments, <script> blocks, and <style> blocks into @extracts,
+    #   replacing them with marker in $HTML.  Note the order of the two
+    #   comment formats.
     $i= 0 ;
-    $HTML=~ s/(<!--.*?--\s*>)/ push(@comments,$1), $marker . $i++ . "\0" /sge ;
-    $HTML=~ s/(<!--.*?>)/      push(@comments,$1), $marker . $i++ . "\0" /sge ;
+    $HTML=~ s#(<!--.*?--\s*>|<!--.*?>|<\s*script\b.*?<\s*/script\b.*?>|<\s*style\b.*?<\s*/style\b.*?>)#
+	      push(@extracts, $1), $marker . $i++ . "\0"  #sgie ;
+
+#    $HTML=~ s/(<!--.*?--\s*>)/ push(@comments,$1), $marker . $i++ . "\0" /sge ;
+#    $HTML=~ s/(<!--.*?>)/      push(@comments,$1), $marker . $i++ . "\0" /sge ;
 
 
     # Next, defaultify either the entire $HTML or just one form within it.
@@ -226,8 +242,8 @@ sub defaultify {
     }
 
 
-    # Finally, replace comments back into $HTML.
-    $HTML=~ s/\Q$marker\E(\d+)\0/$comments[$1]/g ;
+    # Finally, replace comments and <script> and <style> blocks back into $HTML.
+    $HTML=~ s/\Q$marker\E(\d+)\0/$extracts[$1]/g ;
 
 
     return wantarray  ? ($HTML, $defaults)  : $HTML ;
@@ -248,7 +264,8 @@ sub new_inputtag {
     my($tag_name, $attr)= &parse_tag($old_tag) ;
 
     # Sanity check
-    croak("new_inputtag() called without <input>") unless $tag_name eq 'input' ;
+    croak("new_inputtag() called without <input>")
+	unless lc($tag_name) eq 'input' ;
 
     # Lowercase type attribute for easier comparisons
     $attr->{'type'}= lc($attr->{'type'}) ;
@@ -302,7 +319,8 @@ sub new_textarea {
     my($tag_name, $attr)= &parse_tag($old_block) ;  # parses first tag only
 
     # Sanity check
-    croak("new_textarea() called without <textarea>") unless $tag_name eq 'textarea' ;
+    croak("new_textarea() called without <textarea>")
+	unless lc($tag_name) eq 'textarea' ;
 
     # Set text between <textarea> and </textarea> to the default.
     my($contents)= &HTMLescape(&extract_default($defaults, $attr->{'name'})) ;
@@ -320,7 +338,8 @@ sub new_select {
     my($tag_name, $attr)= &parse_tag($old_block) ;  # parses first tag only
 
     # Sanity check
-    croak("new_select() called without <select>") unless $tag_name eq 'select' ;
+    croak("new_select() called without <select>")
+	unless lc($tag_name) eq 'select' ;
 
     # Only allow one option to be set unless <select> has "multiple" attribute.
     # Tricky to update only the first matching option.  Here, we split() with
@@ -355,7 +374,8 @@ sub new_option {
     my($is_match) ;
 
     # Sanity check
-    croak("new_option() called without <option>") unless $tag_name eq 'option' ;
+    croak("new_option() called without <option>")
+	unless lc($tag_name) eq 'option' ;
 
     # If $force_off is set, then set $is_match=0 .
     if ($force_off) {
